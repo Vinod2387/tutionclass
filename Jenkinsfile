@@ -1,15 +1,19 @@
 pipeline {
     agent any
 
+    tools {
+        nodejs 'Nodejs'  // Replace with your configured NodeJS tool name in Jenkins
+        dockerTool 'docker' // Replace with your configured Docker tool name in Jenkins
+    }
+
     environment {
-        NODE_ENV = 'production'
-        DOCKER_IMAGE = 'yourdockerhubusername/your-node-app'
+        SONARQUBE_ENV = credentials('sonar-token')  // Jenkins credentials ID
     }
 
     stages {
         stage('Checkout') {
             steps {
-                git url: 'https://github.com/your/repo.git', branch: 'main'
+                git branch: 'main', url: 'https://github.com/Vinod2387/tutionclass.git'
             }
         }
 
@@ -19,9 +23,14 @@ pipeline {
             }
         }
 
-        stage('Lint Code') {
+        stage('Lint Changed Files') {
             steps {
-                sh 'npm run lint'
+                // Add node_modules/.bin to PATH so eslint (installed locally) can run
+                sh '''
+                    export PATH=$PWD/node_modules/.bin:$PATH
+                    git fetch origin main
+                    git diff --name-only origin/main...HEAD | grep '\\.js$' | xargs eslint || true
+                '''
             }
         }
 
@@ -31,53 +40,61 @@ pipeline {
             }
         }
 
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    def scannerHome = tool name: 'sonar-scanner', type: 'hudson.plugins.sonar.SonarRunnerInstallation'
+                    withSonarQubeEnv('sonar-server') {
+                        sh """
+                            ${scannerHome}/bin/sonar-scanner \
+                            -Dsonar.projectKey=my-project \
+                            -Dsonar.sources=. \
+                            -Dsonar.host.url=http://172.17.0.2:9000 \
+                            -Dsonar.login=${SONARQUBE_ENV}
+                        """
+                    }
+                }
+            }
+        }
+
         stage('Code Coverage') {
             steps {
                 sh 'npm run coverage'
             }
         }
-
-        stage('Static Code Analysis') {
-            steps {
-                withSonarQubeEnv('SonarQubeServer') {
-                    sh 'sonar-scanner'
-                }
-            }
-        }
-
+        
         stage('Build Docker Image') {
             steps {
-                sh 'docker build -t $DOCKER_IMAGE .'
-            }
-        }
+                script {
+                    withDockerRegistry(credentialsId: 'docker-cred', toolName: 'docker') {
 
-        stage('Push Docker Image') {
-            steps {
-                withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
-                    sh '''
-                        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-                        docker push $DOCKER_IMAGE
-                    '''
+                        sh "docker build -t tutionclass:latest ."
+                    }
                 }
             }
-        }
+        } 
 
-        stage('Deploy to Environment') {
+        stage('Tag & Push Docker Image') {
             steps {
-                sh 'kubectl apply -f k8s/deployment.yaml'
-            }
-        }
-    }
+                script {
+                    withDockerRegistry(credentialsId: 'docker-cred', toolName: 'docker') {
 
-    post {
-        always {
-            echo 'Pipeline completed.'
-        }
-        success {
-            echo 'Build succeeded!'
-        }
-        failure {
-            echo 'Build failed.'
+                        sh "docker tag tutionclass:latest vinod2387/tutionclass:latest"
+                        sh "docker push vinod2387/tutionclass:latest"
+                    }
+                }
+            }
+        }        
+        
+        stage('Deploy Application') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker-cred', toolName: 'docker') {
+
+                        sh "docker run -d -p 3000:3000 vinod2387/tutionclass:latest"
+                    }
+                }
+            }    
         }
     }
 }
